@@ -3,7 +3,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
-const formidable = require('formidable'); // <-- important
+const formidable = require('formidable');
 
 const PORT = 3000;
 const uploadRoot = path.join(__dirname, 'uploads');
@@ -40,7 +40,7 @@ function handleUpload(req, res) {
   const form = formidable({
     uploadDir: uploadRoot,
     keepExtensions: true,
-    maxFileSize: 50 * 1024 * 1024,
+    maxFileSize: 50 * 1024 * 1024, // 50MB
     multiples: false
   });
 
@@ -171,43 +171,6 @@ function handleFileDownload(req, res) {
   });
 }
 
-function handleStatic(req, res) {
-  const publicRoot = path.join(__dirname, 'public');
-  let relativePath = req.url.substring('/public/'.length);
-  relativePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, '');
-  const filePath = path.join(publicRoot, relativePath);
-
-  if (!filePath.startsWith(publicRoot)) {
-    res.statusCode = 400;
-    return res.end('Invalid static path');
-  }
-
-  fs.stat(filePath, (err, stats) => {
-    if (err || !stats.isFile()) {
-      res.statusCode = 404;
-      return res.end('Static file not found');
-    }
-
-    const ext = path.extname(filePath).toLowerCase();
-    let contentType = 'application/octet-stream';
-    if (ext === '.css') contentType = 'text/css';
-    else if (ext === '.js') contentType = 'application/javascript';
-    else if (ext === '.png') contentType = 'image/png';
-    else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
-    else if (ext === '.gif') contentType = 'image/gif';
-
-    res.statusCode = 200;
-    res.setHeader('Content-Type', contentType);
-
-    const readStream = fs.createReadStream(filePath);
-    readStream.on('error', () => {
-      res.statusCode = 500;
-      res.end('Error reading static file');
-    });
-    readStream.pipe(res);
-  });
-}
-
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/') {
     return handleRoot(req, res);
@@ -216,10 +179,6 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/favicon.ico') {
     res.statusCode = 204;
     return res.end();
-  }
-
-  if (req.method === 'GET' && req.url.startsWith('/public/')) {
-    return handleStatic(req, res);
   }
 
   if (req.method === 'POST' && req.url === '/upload') {
