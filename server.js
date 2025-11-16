@@ -3,7 +3,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
-const multiparty = require('multiparty');
+const formidable = require('formidable'); // <-- important
 
 const PORT = 3000;
 const uploadRoot = path.join(__dirname, 'uploads');
@@ -37,13 +37,19 @@ async function handleRoot(req, res) {
 function handleUpload(req, res) {
   console.log('Incoming upload request');
 
-  const form = new multiparty.Form();
+  const form = formidable({
+    uploadDir: uploadRoot,
+    keepExtensions: true,
+    maxFileSize: 50 * 1024 * 1024,
+    multiples: false
+  });
 
-  form.parse(req, (err, fields, files) => {
+  form.parse(req, async (err, fields, files) => {
     if (err) {
       console.error('Parse error:', err);
       res.statusCode = 500;
-      return res.end('Error parsing upload: ' + err.message);
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ error: 'Error parsing upload: ' + err.message }));
     }
 
     console.log('Fields:', fields);
@@ -63,33 +69,36 @@ function handleUpload(req, res) {
 
     if (!file) {
       console.error('No file found in parsed data');
-      res.statusCode = 500;
-      return res.end('No file uploaded (server did not receive any file).');
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ error: 'No file uploaded' }));
     }
 
-    saveFileWithUniqueName(file)
-      .then((relativePath) => {
-        const urlPath = `/files/${relativePath}`;
-        res.statusCode = 200;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(
-          JSON.stringify({
-            message: 'Upload successful',
-            fileName: relativePath,
-            url: urlPath
-          })
-        );
-      })
-      .catch((e) => {
-        console.error('Save error:', e);
-        res.statusCode = 500;
-        res.end('Failed to save file.');
-      });
+    try {
+      const relativePath = await saveFileWithUniqueName(file);
+      const urlPath = `/files/${relativePath}`;
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          message: 'Upload successful',
+          fileName: relativePath,
+          url: urlPath,
+          size: file.size,
+          originalName: file.originalFilename || file.newFilename
+        })
+      );
+    } catch (e) {
+      console.error('Save error:', e);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: 'Failed to save file: ' + e.message }));
+    }
   });
 }
 
 async function saveFileWithUniqueName(file) {
-  const originalName = file.originalFilename || 'file';
+  const originalName = file.originalFilename || file.newFilename || 'file';
   const ext = path.extname(originalName);
   const uniqueName = crypto.randomBytes(16).toString('hex') + ext;
 
@@ -102,26 +111,15 @@ async function saveFileWithUniqueName(file) {
   await fsp.mkdir(dir, { recursive: true });
 
   const finalPath = path.join(dir, uniqueName);
-  const tempPath = file.path;
+  const tempPath = file.filepath || file.path;
 
   if (!tempPath) {
-    throw new Error('No temp path from multiparty');
+    throw new Error('No temp path from formidable');
   }
 
-  await streamCopy(tempPath, finalPath);
+  await fsp.rename(tempPath, finalPath);
 
   return path.relative(uploadRoot, finalPath).replace(/\\/g, '/');
-}
-
-function streamCopy(src, dest) {
-  return new Promise((resolve, reject) => {
-    const readStream = fs.createReadStream(src);
-    const writeStream = fs.createWriteStream(dest);
-    readStream.on('error', reject);
-    writeStream.on('error', reject);
-    writeStream.on('finish', resolve);
-    readStream.pipe(writeStream);
-  });
 }
 
 function handleFileDownload(req, res) {
@@ -141,7 +139,7 @@ function handleFileDownload(req, res) {
   const filePath = path.resolve(uploadRoot, safeRelativePath);
 
   if (!filePath.startsWith(uploadRoot)) {
-    res.statusCode = 500;
+    res.statusCode = 400;
     return res.end('Invalid file path.');
   }
 
@@ -157,6 +155,9 @@ function handleFileDownload(req, res) {
     else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
     else if (ext === '.gif') contentType = 'image/gif';
     else if (ext === '.pdf') contentType = 'application/pdf';
+    else if (ext === '.txt') contentType = 'text/plain';
+    else if (ext === '.json') contentType = 'application/json';
+    else if (ext === '.zip') contentType = 'application/zip';
 
     res.statusCode = 200;
     res.setHeader('Content-Type', contentType);
@@ -170,6 +171,43 @@ function handleFileDownload(req, res) {
   });
 }
 
+function handleStatic(req, res) {
+  const publicRoot = path.join(__dirname, 'public');
+  let relativePath = req.url.substring('/public/'.length);
+  relativePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, '');
+  const filePath = path.join(publicRoot, relativePath);
+
+  if (!filePath.startsWith(publicRoot)) {
+    res.statusCode = 400;
+    return res.end('Invalid static path');
+  }
+
+  fs.stat(filePath, (err, stats) => {
+    if (err || !stats.isFile()) {
+      res.statusCode = 404;
+      return res.end('Static file not found');
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    let contentType = 'application/octet-stream';
+    if (ext === '.css') contentType = 'text/css';
+    else if (ext === '.js') contentType = 'application/javascript';
+    else if (ext === '.png') contentType = 'image/png';
+    else if (ext === '.jpg' || ext === '.jpeg') contentType = 'image/jpeg';
+    else if (ext === '.gif') contentType = 'image/gif';
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', contentType);
+
+    const readStream = fs.createReadStream(filePath);
+    readStream.on('error', () => {
+      res.statusCode = 500;
+      res.end('Error reading static file');
+    });
+    readStream.pipe(res);
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/') {
     return handleRoot(req, res);
@@ -178,6 +216,10 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/favicon.ico') {
     res.statusCode = 204;
     return res.end();
+  }
+
+  if (req.method === 'GET' && req.url.startsWith('/public/')) {
+    return handleStatic(req, res);
   }
 
   if (req.method === 'POST' && req.url === '/upload') {
